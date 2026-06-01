@@ -222,8 +222,17 @@ __marimo__/
 _SUCCESS
 *.parquet.*
 *.parquet
+# Dados grandes (censo 2022)
+data/censo 2022/*.csv
+data/censo 2022/*.parquet
+
 # Outputs gerados
 outputs/figures/*
 outputs/models/*
 !outputs/figures/.gitkeep
 !outputs/models/.gitkeep
+*.csv
+*.xlsx
+*.log
+*.pkl
+*.xls
