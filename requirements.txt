@@ -1,0 +1,20 @@
+# Data
+pandas
+numpy
+pyarrow
+
+# ML não supervisionado
+scikit-learn
+scipy
+hdbscan
+umap-learn
+
+# Visualização
+matplotlib
+seaborn
+plotly
+
+# Utilitários
+tqdm
+ipykernel
+jupyter

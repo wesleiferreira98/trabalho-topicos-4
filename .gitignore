@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+*.snappy.parquet
+*.snappy.parquet.crc
+*.crc
+_SUCCESS
+
+# Outputs gerados
+outputs/figures/*
+outputs/models/*
+!outputs/figures/.gitkeep
+!outputs/models/.gitkeep
