@@ -19,3 +19,4 @@ plotly
 tqdm
 ipykernel
 jupyter
+xlrd
