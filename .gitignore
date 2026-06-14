@@ -213,7 +213,9 @@ tempCodeRunnerFile.py
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-
+.codex/
+.codex
+.claude/
 # Streamlit
 .streamlit/secrets.toml
 *.snappy.parquet
