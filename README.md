@@ -35,7 +35,7 @@ O IBGE classifica cada setor de forma binária: **urbano** ou **rural**. Essa di
 
 ## 2. Por que Aprendizado Não Supervisionado
 
-A primeira alternativa que surge é treinar um classificador supervisionado usando o campo `situacao` (urbano/rural) do CNEFE 2010 como label. Mas isso enfrenta dois problemas fundamentais.
+A primeira ideia que nos vem a mente é treinar um classificador supervisionado usando o campo `situacao` (urbano/rural) do CNEFE 2010 como label. Mas isso enfrenta dois problemas fundamentais.
 
 ### 2.1 Incompatibilidade de Schema entre os Censos
 
@@ -85,7 +85,7 @@ O formato **Parquet** resolve isso de três formas:
 2. **Compressão nativa**: o arquivo é ~8x menor que o CSV equivalente
 3. **Tipagem forte**: tipos de dados preservados sem parsing, eliminando erros de conversão
 
-O CNEFE 2010 está particionado em múltiplos arquivos `.snappy.parquet` — padrão eficiente para dados grandes que permite leitura paralela e acesso seletivo por partição.
+O CNEFE 2010 está particionado em múltiplos arquivos `.snappy.parquet`  padrão eficiente para dados grandes que permite leitura paralela e acesso seletivo por partição.
 
 ### 3.3 Por que DuckDB
 
@@ -143,6 +143,8 @@ Adicionalmente, `COD_INDICADOR_FINALIDADE_CONST` indica a finalidade declarada d
 
 **Total: 11 features** para o Censo 2022.
 
+Essa lista é o contrato central do pipeline: todo passo seguinte — normalização, UMAP e HDBSCAN — recebe exatamente `df[FEATURES].values` como entrada. A ordem importa para o heatmap de z-scores (seções 5 e 9).
+
 ```python
 FEATURES = [
     'prop_domicilio_particular', 'prop_domicilio_coletivo',
@@ -154,22 +156,22 @@ FEATURES = [
 
 ### 4.3 Features do CNEFE 2010
 
-O CNEFE 2010 não possui `COD_ESPECIE`. A informação disponível é o campo `tipo`, que descreve o tipo de logradouro. Calculamos as proporções dos 12 tipos mais frequentes na Bahia:
+O CNEFE 2010 não possui `COD_ESPECIE`. A informação disponível é o campo `tipo`, que descreve o tipo de logradouro. Calculamos as proporções dos 12 tipos mais frequentes na Bahia. O agrupamento comentado no código (urbanos/rurais) é apenas descritivo — o algoritmo não vê essa separação, ela serve para o leitor entender a semântica intuitiva de cada feature:
 
 ```python
 FEATURES_2010 = [
-    # logradouros urbanos
+    # logradouros tipicamente urbanos
     'prop_rua', 'prop_avenida', 'prop_travessa', 'prop_praca', 'prop_alameda', 'prop_beco',
-    # logradouros rurais
+    # logradouros tipicamente rurais
     'prop_fazenda', 'prop_estrada', 'prop_caminho', 'prop_rodovia', 'prop_sitio', 'prop_povoado'
 ]
 ```
 
-**Decisão metodológica crítica:** o CNEFE 2010 também possui `prop_urbano` e `prop_rural` (derivadas do campo `situacao`). Essas features foram **deliberadamente excluídas** do clustering. Incluí-las tornaria a análise circular — estaríamos encontrando clusters de "urbano" e "rural" usando exatamente o campo que define urbano e rural. O objetivo é descobrir estrutura com base no tipo de uso do solo, e depois verificar se essa estrutura corresponde à classificação oficial.
+**Decisão metodológica crítica:** o CNEFE 2010 também possui `prop_urbano` e `prop_rural` (derivadas do campo `situacao`). Essas features foram **deliberadamente excluídas** do clustering. Incluí-las tornaria a análise circular estaríamos encontrando clusters de "urbano" e "rural" usando exatamente o campo que define urbano e rural. O objetivo é descobrir estrutura com base no tipo de uso do solo, e depois verificar se essa estrutura corresponde à classificação oficial.
 
 ### 4.4 Normalização
 
-Todas as features passam por `StandardScaler` (z-score):
+Todas as features passam por `StandardScaler` (z-score). `fit_transform()` em uma única chamada ajusta a média e desvio-padrão de cada coluna nos dados de treino e já aplica a transformação — equivalente a calcular `(x - média) / desvio_padrão` para cada feature. O objeto `scaler` é salvo em memória pois será reutilizado no experimento COM/SEM geo (seção 6.3) com `scaler.transform()`, sem re-ajuste:
 
 ```python
 from sklearn.preprocessing import StandardScaler
@@ -198,7 +200,7 @@ Clusters encontrados              7              13
 Ruído (%)                      89.3%           0.3%
 ```
 
-Com HDBSCAN direto em 11D, **89% dos setores são descartados como ruído** — o algoritmo não encontra estrutura densa no espaço original.
+Com HDBSCAN direto em 11D, **89% dos setores são descartados como ruído**  o algoritmo não encontra estrutura densa no espaço original.
 
 ### 5.2 UMAP como Pré-processamento
 
@@ -223,15 +225,17 @@ Os parâmetros têm justificativa direta:
 
 ### 5.3 HDBSCAN no Espaço UMAP
 
+Com o espaço reduzido a 2D, o HDBSCAN identifica regiões de alta densidade e as separa em clusters. `fit_predict()` retorna um array de rótulos inteiros: valores ≥ 0 indicam o cluster atribuído, e `-1` indica ruído (ponto que não pertence a nenhum cluster denso). Cada parâmetro controla um critério diferente de "o que é um cluster":
+
 ```python
 import hdbscan
 
 clusterer = hdbscan.HDBSCAN(
-    min_cluster_size=50,    # cluster deve ter ao menos 50 setores
-    min_samples=3,          # ponto é core se tiver 3 vizinhos próximos
+    min_cluster_size=50,    # cluster deve ter ao menos 50 setores para existir
+    min_samples=3,          # ponto precisa de 3 vizinhos próximos para ser considerado core
     metric='euclidean',
-    cluster_selection_method='eom',  # Excess of Mass: prefere clusters compactos
-    prediction_data=True
+    cluster_selection_method='eom',  # Excess of Mass: prefere clusters compactos ao invés de hierárquicos
+    prediction_data=True             # guarda estrutura interna para soft clustering futuro
 )
 labels = clusterer.fit_predict(X_umap)
 ```
@@ -256,7 +260,7 @@ O trade-off é deliberado:
 
 ### 5.5 Nomenclatura Semântica dos Clusters
 
-Cada cluster recebe um nome baseado no perfil de z-scores médio de todos os seus setores, não apenas na feature de maior valor absoluto:
+Cada cluster recebe um nome baseado no perfil de z-scores médio de todos os seus setores, não apenas na feature de maior valor absoluto. Os nomes são atribuídos manualmente após inspeção visual do heatmap de z-scores (notebook 05): uma linha do heatmap com z-score muito positivo em `prop_domicilio_coletivo` e negativo em todas as outras, por exemplo, leva ao nome "Domicílio Coletivo (Institucional)". Não há automação nessa etapa — é interpretação humana dos padrões quantitativos:
 
 ```python
 NOMES_CLUSTER = {
@@ -284,11 +288,11 @@ Os clusters 0–3 merecem atenção: seus z-scores são praticamente idênticos 
 
 ### 6.1 Clustering do CNEFE 2010
 
-Aplicamos HDBSCAN diretamente nos 12 features z-score do CNEFE 2010:
+Aplicamos HDBSCAN diretamente nos 12 features z-score do CNEFE 2010, sem UMAP. Como o CNEFE 2010 tem apenas ~24.000 setores (vs 30.355 em 2022) e os dados são mais esparsos — sem coordenadas geográficas e com distribuição de tipos mais binária (rua ou fazenda, sem as 8 espécies do COD_ESPECIE) —, usamos `min_cluster_size=200` em vez de 50, evitando fragmentação excessiva em subgrupos geograficamente locais mas semanticamente idênticos:
 
 ```python
 clusterer = hdbscan.HDBSCAN(
-    min_cluster_size=200,   # mais conservador: 2010 tem menos setores (~24k)
+    min_cluster_size=200,   # mais conservador: 2010 tem menos setores e dados mais esparsos
     min_samples=3,
     metric='euclidean',
     cluster_selection_method='eom'
@@ -298,21 +302,21 @@ df_2010['cluster'] = clusterer.fit_predict(X)
 
 ### 6.2 Validação a Posteriori: 92% de Pureza
 
-Com os clusters definidos sem usar `situacao`, cruzamos o resultado com o campo oficial:
+Com os clusters definidos sem usar `situacao`, cruzamos o resultado com o campo oficial. `pd.crosstab` gera uma matriz cluster × situacao_oficial com contagens: cada linha é um cluster, cada coluna é uma categoria oficial. `idxmax(axis=1)` pega o nome da coluna com maior contagem em cada linha (a categoria dominante); `max(axis=1) / sum(axis=1)` divide esse máximo pelo total da linha para obter a fração. A pureza final é ponderada pelo tamanho de cada cluster para não dar peso igual a clusters com 50 e 5.000 setores:
 
 ```python
 df_val['situacao_oficial'] = (df_val['prop_urbano'] > 0.5).map({True: 'Urbano', False: 'Rural'})
 
 ct        = pd.crosstab(df_val['cluster'], df_val['situacao_oficial'])
-dominante = ct.idxmax(axis=1)
-pureza    = ct.max(axis=1) / ct.sum(axis=1)
-n         = ct.sum(axis=1)
+dominante = ct.idxmax(axis=1)          # categoria mais frequente em cada cluster
+pureza    = ct.max(axis=1) / ct.sum(axis=1)  # fração do grupo dominante
+n         = ct.sum(axis=1)             # tamanho de cada cluster
 
-pureza_media_ponderada = (pureza * n).sum() / n.sum()
+pureza_media_ponderada = (pureza * n).sum() / n.sum()  # média ponderada pelo tamanho
 # → 92%
 ```
 
-**92% de pureza ponderada** significa que 92% dos setores de cada cluster pertencem à mesma categoria oficial (todos urbanos ou todos rurais). O algoritmo recuperou a estrutura urbano/rural usando apenas o tipo de logradouro — confirmando que as features capturam algo real.
+**92% de pureza ponderada** significa que 92% dos setores de cada cluster pertencem à mesma categoria oficial (todos urbanos ou todos rurais). O algoritmo recuperou a estrutura urbano/rural usando apenas o tipo de logradouro confirmando que as features capturam algo real.
 
 ### 6.3 Experimento COM vs SEM Coordenadas Geográficas
 
@@ -338,10 +342,18 @@ Usar `scaler.transform()` em vez de `fit_transform()` é essencial: recalibrar o
 
 ### 7.1 O Desafio do Join
 
-Os códigos de setor entre os dois Censos têm uma diferença: os códigos de 2022 carregam um sufixo `'P'` (ex: `291840705000165P`) que os de 2010 não têm. Sem remover esse sufixo, o join retorna 0 registros:
+Para cruzar os dois Censos, é preciso unir os DataFrames pelo código do setor censitário. O problema: o IBGE adotou convenções diferentes em cada edição.
+
+- **2010:** `293330705000177` (15 dígitos, sem sufixo)
+- **2022:** `291840705000165P` (15 dígitos + `'P'` no final)
+
+O sufixo `'P'` indica que o registro é do tipo *ponto de endereço* no CNEFE 2022 uma distinção interna do IBGE que não existia em 2010. Como os campos são strings, `'291840705000165P' != '291840705000165'` e o join retorna 0 matches sem tratamento.
+
+A correção é remover o último caractere de todos os códigos de 2022 com `str[:-1]` (fatia de string que descarta a posição `-1`, ou seja, o último caractere):
 
 ```python
-# Remove o sufixo 'P' para compatibilizar os códigos
+# Antes:  '291840705000165P'
+# Depois: '291840705000165'
 df_2022['cod_setor'] = df_2022['cod_setor'].str[:-1]
 
 df = df_2022.merge(
@@ -350,9 +362,11 @@ df = df_2022.merge(
 )
 ```
 
-Após a correção: **19.371 setores presentes nos dois anos**  base da análise temporal.
+Após a correção: **19.371 setores presentes nos dois anos**, base da análise temporal. Os demais 10.984 ficam com `total_2010 = NaN` e são classificados como "Novo Setor (2022)".
 
 ### 7.2 Métricas de Mudança
+
+Para cada setor presente nos dois anos calculamos dois indicadores. `delta_abs` é a variação bruta de endereços (positivo = cresceu, negativo = encolheu). `taxa_cresc` normaliza pelo tamanho original do setor em 2010 — sem isso, um setor pequeno que dobrou de tamanho e um grande que cresceu pouco teriam pesos equivalentes no `delta_abs`, o que distorceria a análise:
 
 ```python
 df_match['delta_abs']  = df_match['total_2022'] - df_match['total_2010']
@@ -363,17 +377,19 @@ Crescimento médio entre 2010 e 2022: **+24,8% de endereços por setor** (median
 
 ### 7.3 Classificação de Trajetórias
 
+A função usa dois eixos de informação para cada setor: a composição em 2010 (o que ele era) e a taxa de crescimento até 2022 (o que aconteceu com ele). As regras são avaliadas em ordem — a primeira que for verdadeira determina o rótulo. Os limiares foram calibrados para capturar mudanças estruturais: 0.3 (30%) de crescimento separa expansão real de variação normal de recenseamento, e 0.5 de `prop_rural` identifica setores predominantemente rurais, não apenas com alguma presença rural:
+
 ```python
 def classificar_trajetoria(row):
     if row['prop_rural_2010'] > 0.5 and row['taxa_cresc'] > 0.3:
-        return 'Rural → Urbano'
+        return 'Rural → Urbano'       # era rural e cresceu >30%: urbanização
     if row['prop_urbano_2010'] > 0.8 and row['taxa_cresc'] > 0.3:
-        return 'Adensamento Urbano'
+        return 'Adensamento Urbano'   # já era urbano e adensou ainda mais
     if row['taxa_cresc'] < -0.2:
-        return 'Declínio'
+        return 'Declínio'             # perdeu >20% dos endereços
     if abs(row['taxa_cresc']) <= 0.2:
-        return 'Estável'
-    return 'Crescimento Moderado'
+        return 'Estável'              # variação dentro de ±20%
+    return 'Crescimento Moderado'     # cresceu entre 20% e 30%
 ```
 
 | Trajetória                 | Setores |
@@ -395,7 +411,7 @@ O cruzamento **trajetória × cluster 2022** revela que o tipo de setor prediz a
 
 ### 8.1 O Problema do Parâmetro ε no DBSCAN
 
-O DBSCAN exige a escolha manual do parâmetro ε (raio de vizinhança). A ferramenta padrão para isso é o **k-distance plot**: ordena os pontos pela distância ao k-ésimo vizinho e procura um "cotovelo" que indique a densidade natural dos dados.
+O DBSCAN exige a escolha manual do parâmetro ε (raio de vizinhança). A ferramenta padrão para isso é o **k-distance plot**: ordena os pontos pela distância ao k-ésimo vizinho e procura um "cotovelo" que indique a densidade natural dos dados. O código abaixo calcula essa distância para cada ponto com `NearestNeighbors`, pega a distância ao 3º vizinho (`dists[:, k-1]`, índice `k-1` pois é base-zero), e ordena do maior para o menor (`[::-1]`) para revelar o cotovelo, se existir:
 
 ```python
 from sklearn.neighbors import NearestNeighbors
@@ -403,7 +419,7 @@ from sklearn.neighbors import NearestNeighbors
 k = 3
 nbrs = NearestNeighbors(n_neighbors=k).fit(X_umap)
 dists, _ = nbrs.kneighbors(X_umap)
-kdist = np.sort(dists[:, k-1])[::-1]
+kdist = np.sort(dists[:, k-1])[::-1]   # distância ao 3º vizinho, ordem decrescente
 ```
 
 No caso dos setores censitários da Bahia, o k-distance plot **não mostra cotovelo claro**. A curva declina de forma suave e contínua  os dados têm densidades muito diferentes entre os grupos (setores urbanos de Salvador são muito mais densos que setores rurais do sertão). Qualquer ε escolhido será arbitrário.
@@ -423,12 +439,12 @@ Com ε=1.50, o DBSCAN chega ao mesmo número de clusters que o HDBSCAN e ao mesm
 
 ### 8.3 Por que a Densidade Variável é o Problema Fundamental
 
-O DBSCAN trata densidade como uniforme: define um único ε para todo o espaço. O HDBSCAN é **hierárquico**: constrói uma árvore de dendrograma e seleciona clusters em diferentes níveis de densidade, preservando tanto os grupos compactos (Dom. Coletivo 175 setores muito específicos) quanto os grupos difusos (Rural  muitos setores com composição variada).
+O DBSCAN trata densidade como uniforme: define um único ε para todo o espaço. O HDBSCAN é **hierárquico**: constrói uma árvore de dendrograma e seleciona clusters em diferentes níveis de densidade, preservando tanto os grupos compactos (Dom. Coletivo — 175 setores muito específicos) quanto os grupos difusos (Rural — muitos setores com composição variada). Ao contrário do ε do DBSCAN — que não tem unidade intuitiva no espaço UMAP —, `min_cluster_size` tem interpretação direta: "só considere um grupo como cluster se ele contiver ao menos 50 setores":
 
 ```python
-# HDBSCAN — sem ε, parâmetro interpretável
+# HDBSCAN — sem ε, parâmetro com interpretação direta
 clusterer = hdbscan.HDBSCAN(
-    min_cluster_size=50,   # "um cluster é relevante se tem ao menos 50 setores"
+    min_cluster_size=50,   # threshold mínimo de tamanho para existir como cluster
     min_samples=3,
     cluster_selection_method='eom'
 )
@@ -583,3 +599,4 @@ jupyter nbconvert --to notebook --execute notebooks/09_comparacao_algoritmos.ipy
 **[12]** Raasveldt, M., & Mühleisen, H. (2019). DuckDB: an embeddable analytical database. In *Proceedings of the 2019 International Conference on Management of Data (SIGMOD '19)*, pp. 1981–1984. ACM.
 
 > Artigo original do DuckDB. Descreve a arquitetura de execução SQL colunar e a integração nativa com Parquet  justifica o uso para agregação de 9 milhões de registros sem carregamento completo em RAM.
+
