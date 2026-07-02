@@ -11,15 +11,17 @@
 1. [Contexto e Motivação](#1-contexto-e-motivação)
 2. [Por que Aprendizado Não Supervisionado](#2-por-que-aprendizado-não-supervisionado)
 3. [Dados e Infraestrutura](#3-dados-e-infraestrutura)
+   - [3.4 Coleta e Pré-processamento](#34-coleta-e-pré-processamento)
 4. [Engenharia de Features](#4-engenharia-de-features)
 5. [Pipeline de Modelagem 2022](#5-pipeline-de-modelagem-2022)
 6. [Análise de 2010: Validação a Posteriori e Consistência Temporal](#6-análise-de-2010-validação-a-posteriori-e-consistência-temporal)
 7. [Análise Temporal 2010 → 2022](#7-análise-temporal-2010--2022)
 8. [Comparação de Algoritmos: DBSCAN vs HDBSCAN](#8-comparação-de-algoritmos-dbscan-vs-hdbscan)
 9. [Resultados e Interpretação](#9-resultados-e-interpretação)
-10. [Estrutura do Repositório](#10-estrutura-do-repositório)
-11. [Perguntas Frequentes sobre a Metodologia](#11-perguntas-frequentes-sobre-a-metodologia)
-12. [Referências Bibliográficas](#12-referências-bibliográficas)
+10. [Aderência aos Requisitos do Projeto](#10-aderência-aos-requisitos-do-projeto)
+11. [Estrutura do Repositório](#11-estrutura-do-repositório)
+12. [Perguntas Frequentes sobre a Metodologia](#12-perguntas-frequentes-sobre-a-metodologia)
+13. [Referências Bibliográficas](#13-referências-bibliográficas)
 
 ---
 
@@ -119,6 +121,77 @@ df_setores = con.execute(f"""
 ```
 
 Essa query reduz 9 milhões de linhas para ~30.000 setores em segundos, sem ocupar memória com os dados brutos. O resultado já chega como `DataFrame` Pandas, pronto para o pipeline de ML.
+
+### 3.4 Coleta e Pré-processamento
+
+#### 3.4.1 Obtenção dos Dados
+
+Os dados foram obtidos diretamente do portal do IBGE:
+
+- **CNEFE 2010**: baixado em formato de tabelas DBF/CSV por Unidade da Federação e convertido para Parquet com compressão Snappy. O arquivo da Bahia contém ~4,8 milhões de registros de endereço distribuídos em múltiplos arquivos particionados.
+- **Censo 2022**: disponibilizado pelo IBGE em formato CSV por UF e convertido para Parquet antes do início da análise. O arquivo `29_BA.parquet` resultante contém ~9 milhões de registros com coordenadas geográficas por endereço, inovação ausente no CNEFE 2010.
+
+#### 3.4.2 Limpeza e Filtragem
+
+Antes da agregação, dois filtros são aplicados diretamente na query DuckDB:
+
+```python
+WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL   # remove endereços sem geocodificação
+HAVING COUNT(*) >= 5                                   # remove setores com menos de 5 endereços
+```
+
+O filtro de coordenadas nulas elimina endereços com nível de geocodificação insuficiente (`NV_GEO_COORD >= 4`). O filtro de mínimo de endereços por setor garante que as proporções calculadas não sejam dominadas por acaso estatístico: um setor com 2 endereços em que 1 é um estabelecimento de saúde teria `prop_estab_saude = 0.5`, valor artificialmente alto sem significado real. Com `HAVING COUNT(*) >= 5`, esse tipo de setor é excluído antes da modelagem.
+
+Após os filtros: **30.355 setores** do Censo 2022 e **23.763 setores** do CNEFE 2010 compõem o conjunto final.
+
+#### 3.4.3 Transformação em Vetor de Proporções
+
+A etapa central do pré-processamento é a transformação de 9 milhões de linhas de endereço em 30.355 vetores de proporção por setor. Toda essa transformação ocorre em SQL, sem carregar os dados brutos em memória:
+
+```python
+# Cada CASE WHEN calcula a proporção de endereços de cada tipo no setor
+SUM(CASE WHEN COD_ESPECIE = 1 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS prop_domicilio_particular,
+SUM(CASE WHEN COD_ESPECIE = 2 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS prop_domicilio_coletivo,
+SUM(CASE WHEN COD_ESPECIE = 3 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS prop_estab_agropecuario,
+# ... demais 8 proporções
+AVG(LATITUDE)  AS lat_centroide,   # centroide geográfico do setor
+AVG(LONGITUDE) AS lon_centroide
+```
+
+O resultado intermediário é salvo em `outputs/setores_features.parquet` (30.355 × 15 colunas), servindo como ponto de entrada para todas as etapas seguintes sem necessidade de re-processar os dados brutos.
+
+#### 3.4.4 Normalização
+
+Com as proporções calculadas, aplicamos `StandardScaler` (z-score) para colocar todas as features na mesma escala antes do UMAP e do clustering:
+
+```python
+from sklearn.preprocessing import StandardScaler
+
+scaler = StandardScaler()
+X = scaler.fit_transform(df_setores[FEATURES])   # ajusta e transforma
+```
+
+O objeto `scaler` é preservado em memória para ser reutilizado com `scaler.transform()` (sem re-ajuste) nos experimentos de comparação temporal e COM/SEM coordenadas geográficas, garantindo que as escalas sejam comparáveis entre as configurações.
+
+#### 3.4.5 Resumo do Pipeline
+
+```
+Dados brutos (IBGE)
+    │
+    ├── CNEFE 2010 (~4,8M linhas, CSV/DBF → Parquet)
+    │       └── DuckDB: agrega por setor → 23.763 setores × 12 proporções
+    │
+    └── Censo 2022 (~9M linhas, CSV → Parquet)
+            └── DuckDB: agrega por setor → 30.355 setores × 11 proporções + lat/lon
+                    │
+                    ├── StandardScaler → z-scores (X)
+                    │
+                    ├── UMAP (n_components=2) → X_umap
+                    │
+                    └── HDBSCAN (min_cluster_size=50) → 13 clusters
+                                │
+                                └── outputs/setores_clusterizados.parquet
+```
 
 ---
 
@@ -599,7 +672,43 @@ A distribuição no mapa da Bahia confirma coerência geográfica:
 
 ---
 
-## 10. Estrutura do Repositório
+## 10. Aderência aos Requisitos do Projeto
+
+### 10.1 Execução do Pré-processamento
+
+O pré-processamento é executado inteiramente no notebook `04_preprocessamento.ipynb` e compreende quatro etapas encadeadas: (1) leitura dos arquivos Parquet via DuckDB sem carregamento em memória, (2) filtragem de endereços sem geocodificação e de setores com menos de 5 endereços, (3) agregação de 9 milhões de linhas em 30.355 vetores de proporção por setor via SQL, e (4) normalização z-score com `StandardScaler`. O produto final, `outputs/setores_features.parquet`, é o único artefato que os notebooks de modelagem consomem — os dados brutos do IBGE não são acessados novamente após essa etapa.
+
+Para o CNEFE 2010, o mesmo processo é executado em `08_clustering_2010_ba.ipynb`: leitura dos arquivos `.snappy.parquet` particionados, cálculo de proporções de 12 tipos de logradouro por setor, normalização e clustering.
+
+### 10.2 Aplicação dos Modelos
+
+Dois algoritmos são aplicados e comparados sistematicamente:
+
+**UMAP + HDBSCAN** (`05_modelagem.ipynb`): pipeline principal para o Censo 2022. O UMAP reduz 11 features z-score para 2 dimensões preservando estrutura topológica local. O HDBSCAN aplicado no espaço 2D retorna 13 clusters com 0,3% de ruído. O mesmo algoritmo é aplicado ao CNEFE 2010 em `08_clustering_2010_ba.ipynb` com `min_cluster_size=200`, retornando 11 clusters.
+
+**DBSCAN** (`09_comparacao_algoritmos.ipynb`): aplicado com varredura de ε (0.05, 0.10, 0.30, 1.00, 1.50) sobre as mesmas projeções UMAP, servindo como baseline de comparação. O experimento documenta quantitativamente por que o HDBSCAN é superior neste conjunto de dados.
+
+### 10.3 Validação dos Resultados
+
+A validação ocorre em três camadas independentes:
+
+**Validação interna** (métricas de clustering): Silhouette Score calculado no espaço UMAP (0,31) e no espaço 11D original (-0,10), com discussão explícita de por que a discrepância é esperada e não invalida os clusters. K-distance plot como diagnóstico visual da ausência de estrutura uniforme de densidade.
+
+**Validação externa a posteriori** (`08_clustering_2010_ba.ipynb`): os clusters do CNEFE 2010 são cruzados com o campo `situacao` (urbano/rural), que não foi usado em nenhum momento como feature. A pureza ponderada de **92%** confirma que o algoritmo captura estrutura real nos dados sem supervisão.
+
+**Validação temporal** (`07_analise_temporal_ba.ipynb`): os clusters de 2022 são cruzados com as trajetórias 2010→2022. O fato de que o cluster "Residencial Denso" concentra casos de "Adensamento Urbano" e que o cluster "Rural Agrícola" concentra "Declínio" confirma coerência semântica dos tipos descobertos ao longo do tempo.
+
+### 10.4 Criatividade na Escolha do Problema
+
+O problema tem dois elementos de originalidade que vão além da aplicação direta de algoritmos conhecidos.
+
+O primeiro é a **incompatibilidade de schemas como motivação metodológica**: os dois censos do IBGE (2010 e 2022) descrevem o mesmo fenômeno com campos completamente diferentes, tornando qualquer comparação temporal direta impossível. A solução não supervisionada não é um contorno técnico — é a única abordagem que permite descobrir estrutura comparável nos dois schemas sem suposições de mapeamento arbitrário.
+
+O segundo é a **descoberta de tipologias não oficiais com validação cruzada no tempo**: o IBGE não publica tipologias funcionais de setor censitário além do binário urbano/rural. Os 13 tipos descobertos (Domicílio Coletivo, Rural Agrícola, Residencial Denso, Uso Misto Comercial, etc.) são um produto original que não existe em nenhum cadastro oficial, com aplicações diretas em planejamento urbano e saúde pública. A trajetória de 3.883 setores classificados como "Rural → Urbano" entre os dois censos é um resultado que o IBGE não publica e que só emerge da combinação de clustering não supervisionado com análise temporal.
+
+---
+
+## 11. Estrutura do Repositório
 
 ```
 .
@@ -644,7 +753,7 @@ jupyter nbconvert --to notebook --execute notebooks/09_comparacao_algoritmos.ipy
 
 ---
 
-## 11. Perguntas Frequentes sobre a Metodologia
+## 12. Perguntas Frequentes sobre a Metodologia
 
 **O IBGE já classifica cada endereço por `COD_ESPECIE`. O que este trabalho acrescenta que o IBGE não entrega?**
 
@@ -694,7 +803,7 @@ O Silhouette positivo no espaço UMAP (0.31) confirma que os clusters fazem sent
 
 ---
 
-## 12. Referências Bibliográficas
+## 13. Referências Bibliográficas
 
 ### Algoritmos e Métodos
 
@@ -751,4 +860,3 @@ O Silhouette positivo no espaço UMAP (0.31) confirma que os clusters fazem sent
 **[12]** Raasveldt, M., & Mühleisen, H. (2019). DuckDB: an embeddable analytical database. In *Proceedings of the 2019 International Conference on Management of Data (SIGMOD '19)*, pp. 1981–1984. ACM.
 
 > Artigo original do DuckDB. Descreve a arquitetura de execução SQL colunar e a integração nativa com Parquet  justifica o uso para agregação de 9 milhões de registros sem carregamento completo em RAM.
-
