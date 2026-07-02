@@ -75,6 +75,10 @@ Cadastro Nacional de Endereços para Fins Estatísticos  Censo 2010. Para a Bahi
 **Censo 2022** (`data/censo 2022/29_BA.parquet`)
 CNEFE do Censo Demográfico 2022  Bahia. ~9 milhões de registros. Campos principais: `COD_SETOR`, `COD_ESPECIE` (tipo de estabelecimento), `COD_INDICADOR_FINALIDADE_CONST` (finalidade da construção), `LATITUDE`, `LONGITUDE`.
 
+![Dispersão geográfica dos endereços do Censo 2022 na Bahia (amostra 50k)](outputs/figures/censo_dispersao_geo.png)
+
+*Amostra de 50 mil endereços plotados pelas coordenadas LATITUDE/LONGITUDE do CNEFE 2022. O padrão revela a concentração de endereços na faixa litorânea e nas principais cidades polo (Salvador, Feira de Santana, Vitória da Conquista), com baixa densidade no sertão semi-árido. Essa assimetria geográfica é um dos motivos pelos quais algoritmos de clustering baseados em densidade precisam ser robustos a densidades variáveis.*
+
 ### 3.2 Por que Parquet
 
 Com ~9 milhões de linhas apenas para a Bahia, o formato CSV seria inviável: o arquivo seria >2 GB e o carregamento em memória via `pd.read_csv()` esgotaria a RAM de uma máquina de desenvolvimento comum.
@@ -143,7 +147,7 @@ Adicionalmente, `COD_INDICADOR_FINALIDADE_CONST` indica a finalidade declarada d
 
 **Total: 11 features** para o Censo 2022.
 
-Essa lista é o contrato central do pipeline: todo passo seguinte — normalização, UMAP e HDBSCAN — recebe exatamente `df[FEATURES].values` como entrada. A ordem importa para o heatmap de z-scores (seções 5 e 9).
+Essa lista é o contrato central do pipeline: todo passo seguinte normalização, UMAP e HDBSCAN recebe exatamente `df[FEATURES].values` como entrada. A ordem importa para o heatmap de z-scores (seções 5 e 9).
 
 ```python
 FEATURES = [
@@ -156,7 +160,7 @@ FEATURES = [
 
 ### 4.3 Features do CNEFE 2010
 
-O CNEFE 2010 não possui `COD_ESPECIE`. A informação disponível é o campo `tipo`, que descreve o tipo de logradouro. Calculamos as proporções dos 12 tipos mais frequentes na Bahia. O agrupamento comentado no código (urbanos/rurais) é apenas descritivo — o algoritmo não vê essa separação, ela serve para o leitor entender a semântica intuitiva de cada feature:
+O CNEFE 2010 não possui `COD_ESPECIE`. A informação disponível é o campo `tipo`, que descreve o tipo de logradouro. Calculamos as proporções dos 12 tipos mais frequentes na Bahia. O agrupamento comentado no código (urbanos/rurais) é apenas descritivo o algoritmo não vê essa separação, ela serve para o leitor entender a semântica intuitiva de cada feature:
 
 ```python
 FEATURES_2010 = [
@@ -171,7 +175,7 @@ FEATURES_2010 = [
 
 ### 4.4 Normalização
 
-Todas as features passam por `StandardScaler` (z-score). `fit_transform()` em uma única chamada ajusta a média e desvio-padrão de cada coluna nos dados de treino e já aplica a transformação — equivalente a calcular `(x - média) / desvio_padrão` para cada feature. O objeto `scaler` é salvo em memória pois será reutilizado no experimento COM/SEM geo (seção 6.3) com `scaler.transform()`, sem re-ajuste:
+Todas as features passam por `StandardScaler` (z-score). `fit_transform()` em uma única chamada ajusta a média e desvio-padrão de cada coluna nos dados de treino e já aplica a transformação equivalente a calcular `(x - média) / desvio_padrão` para cada feature. O objeto `scaler` é salvo em memória pois será reutilizado no experimento COM/SEM geo (seção 6.3) com `scaler.transform()`, sem re-ajuste:
 
 ```python
 from sklearn.preprocessing import StandardScaler
@@ -183,6 +187,10 @@ X = scaler.fit_transform(df_setores[FEATURES])
 As proporções variam de forma muito diferente: `prop_domicilio_particular` fica próxima de 1.0 na maioria dos setores urbanos, enquanto `prop_domicilio_coletivo` raramente passa de 0.05. Sem normalização, a feature dominante controlaria sozinha o espaço de distâncias.
 
 O resultado final é salvo em `outputs/setores_features.parquet`: **30.355 setores × 11 features** (z-scores).
+
+![Distribuição do total de endereços por setor censitário](outputs/figures/distribuicao_enderecos_setor.png)
+
+*Histograma do número de endereços por setor após o filtro `HAVING COUNT(*) >= 5`. A distribuição é assimétrica à direita: a maioria dos setores tem entre 50 e 400 endereços (faixa esperada pelo IBGE), mas há setores com milhares (áreas institucionais grandes ou setores de alta densidade urbana). Essa variabilidade justifica o uso de proporções em vez de contagens absolutas como features.*
 
 ---
 
@@ -223,6 +231,10 @@ Os parâmetros têm justificativa direta:
 - `n_neighbors=30`: com 30.000 pontos, valor alto de vizinhança garante que a estrutura global (relação entre todos os tipos de setor) seja preservada, não apenas micro-estruturas locais
 - `min_dist=0.0`: força pontos similares a se agruparem o máximo possível no espaço 2D, criando separação visual clara entre grupos essencial para que o HDBSCAN encontre fronteiras nítidas
 
+![Projeção UMAP dos 30.355 setores censitários da Bahia em 2D](outputs/figures/umap_setores.png)
+
+*Cada ponto é um setor censitário posicionado no espaço 2D do UMAP. Setores com composição funcional similar ficam próximos. Os grupos visualmente separados já indicam a estrutura de clusters antes de qualquer algoritmo de agrupamento: ilhas compactas (domicílios coletivos, setores rurais agrícolas) contrastam com a grande nuvem central de setores residenciais urbanos.*
+
 ### 5.3 HDBSCAN no Espaço UMAP
 
 Com o espaço reduzido a 2D, o HDBSCAN identifica regiões de alta densidade e as separa em clusters. `fit_predict()` retorna um array de rótulos inteiros: valores ≥ 0 indicam o cluster atribuído, e `-1` indica ruído (ponto que não pertence a nenhum cluster denso). Cada parâmetro controla um critério diferente de "o que é um cluster":
@@ -242,6 +254,10 @@ labels = clusterer.fit_predict(X_umap)
 
 **Resultado:** 13 clusters, 0.3% de ruído (90 setores).
 
+![Single Linkage Tree: estrutura hierárquica do HDBSCAN (BA 2022)](outputs/figures/single_linkage_tree_ba.png)
+
+*A árvore de condensação do HDBSCAN mostra como os clusters se formam à medida que o limiar de densidade aumenta. Cada galho representa um cluster persistindo em múltiplos níveis de densidade; galhos que duram mais são mais robustos. A espessura vertical de cada galho é proporcional ao número de setores. O algoritmo seleciona os 13 galhos mais persistentes como clusters finais, descartando os demais como ruído.*
+
 ### 5.4 Por que o Silhouette Score em 11D é Negativo
 
 O Silhouette Score calculado no espaço 11D original é negativo para os clusters encontrados pelo UMAP→HDBSCAN, enquanto no espaço UMAP é positivo:
@@ -260,7 +276,7 @@ O trade-off é deliberado:
 
 ### 5.5 Nomenclatura Semântica dos Clusters
 
-Cada cluster recebe um nome baseado no perfil de z-scores médio de todos os seus setores, não apenas na feature de maior valor absoluto. Os nomes são atribuídos manualmente após inspeção visual do heatmap de z-scores (notebook 05): uma linha do heatmap com z-score muito positivo em `prop_domicilio_coletivo` e negativo em todas as outras, por exemplo, leva ao nome "Domicílio Coletivo (Institucional)". Não há automação nessa etapa — é interpretação humana dos padrões quantitativos:
+Cada cluster recebe um nome baseado no perfil de z-scores médio de todos os seus setores, não apenas na feature de maior valor absoluto. Os nomes são atribuídos manualmente após inspeção visual do heatmap de z-scores (notebook 05): uma linha do heatmap com z-score muito positivo em `prop_domicilio_coletivo` e negativo em todas as outras, por exemplo, leva ao nome "Domicílio Coletivo (Institucional)". Não há automação nessa etapa é interpretação humana dos padrões quantitativos:
 
 ```python
 NOMES_CLUSTER = {
@@ -280,7 +296,19 @@ NOMES_CLUSTER = {
 }
 ```
 
+![Perfil z-score médio por cluster: Censo 2022 BA](outputs/figures/perfil_clusters_heatmap.png)
+
+*Heatmap de z-scores médios: linhas são clusters, colunas são features. Cores quentes (positivo) indicam que o cluster tem proporção acima da média; cores frias (negativo), abaixo. A leitura é por linha: o cluster 11 (Dom. Coletivo) aparece como uma faixa isolada com z-score extremamente positivo em `prop_domicilio_coletivo` e negativo em todo o resto. Clusters rurais se destacam em `prop_estab_agropecuario`; clusters residenciais urbanos têm z-score alto em `prop_domicilio_particular` e `prop_finalidade_residencial`.*
+
 Os clusters 0–3 merecem atenção: seus z-scores são praticamente idênticos em todas as 11 features. O UMAP os separou porque estão geograficamente distribuídos em cidades diferentes da Bahia (Salvador, Feira de Santana, Vitória da Conquista, Ilhéus). São o mesmo tipo funcional de setor em localizações distintas o UMAP capturou tanto a similaridade de composição quanto a separação geográfica residual.
+
+![13 clusters individuais no mapa da Bahia: clusters 0-3 em cidades distintas](outputs/figures/clusters_mapa_13_individuais.png)
+
+*Distribuição geográfica dos 13 clusters individuais. Os clusters 0-3 (Residencial Puro A-D) aparecem cada um concentrado em uma cidade diferente: Salvador, Feira de Santana, Vitória da Conquista e Ilhéus. Isso confirma que o UMAP com coordenadas geográficas capturou tanto a similaridade funcional quanto a separação espacial. O cluster 11 (Dom. Coletivo) aparece como pontos dispersos nas cidades polo.*
+
+![Tipos semânticos agrupados no mapa da Bahia](outputs/figures/clusters_mapa_tipos.png)
+
+*Visão de alto nível com clusters agrupados em 5 tipos semânticos: Residencial (azul), Rural (verde), Uso Misto (laranja), Dom. Coletivo (vermelho) e Comercial/Serviços (amarelo). A separação geográfica é clara: o interior e o sertão são predominantemente Rural; o litoral e as capitais regionais são Residencial; Dom. Coletivo aparece pontualmente nas cidades com hospitais e presídios de referência estadual.*
 
 ---
 
@@ -288,7 +316,7 @@ Os clusters 0–3 merecem atenção: seus z-scores são praticamente idênticos 
 
 ### 6.1 Clustering do CNEFE 2010
 
-Aplicamos HDBSCAN diretamente nos 12 features z-score do CNEFE 2010, sem UMAP. Como o CNEFE 2010 tem apenas ~24.000 setores (vs 30.355 em 2022) e os dados são mais esparsos — sem coordenadas geográficas e com distribuição de tipos mais binária (rua ou fazenda, sem as 8 espécies do COD_ESPECIE) —, usamos `min_cluster_size=200` em vez de 50, evitando fragmentação excessiva em subgrupos geograficamente locais mas semanticamente idênticos:
+Aplicamos HDBSCAN diretamente nos 12 features z-score do CNEFE 2010, sem UMAP. Como o CNEFE 2010 tem apenas ~24.000 setores (vs 30.355 em 2022) e os dados são mais esparsos  sem coordenadas geográficas e com distribuição de tipos mais binária (rua ou fazenda, sem as 8 espécies do COD_ESPECIE), usamos `min_cluster_size=200` em vez de 50, evitando fragmentação excessiva em subgrupos geograficamente locais mas semanticamente idênticos:
 
 ```python
 clusterer = hdbscan.HDBSCAN(
@@ -299,6 +327,14 @@ clusterer = hdbscan.HDBSCAN(
 )
 df_2010['cluster'] = clusterer.fit_predict(X)
 ```
+
+![Perfil z-score dos clusters CNEFE 2010 BA](outputs/figures/perfil_clusters_2010_ba.png)
+
+*Heatmap de z-scores para os clusters do CNEFE 2010. As features aqui são proporções de tipo de logradouro (`prop_rua`, `prop_fazenda`, etc.), não COD_ESPECIE. Os clusters rurais se destacam em `prop_fazenda`, `prop_estrada` e `prop_sitio`; os urbanos, em `prop_rua` e `prop_avenida`. A separação visual confirma que mesmo com features mais simples de 2010 o algoritmo captura a estrutura urbano/rural.*
+
+![Single Linkage Tree: CNEFE 2010 BA](outputs/figures/single_linkage_tree_2010_ba.png)
+
+*Árvore de condensação do HDBSCAN para 2010. Com `min_cluster_size=200` (vs 50 em 2022), a árvore é mais conservadora e produz menos clusters. O galho mais persistente e largo corresponde ao grande cluster de setores urbanos residenciais; galhos mais finos e curtos correspondem a grupos rurais específicos.*
 
 ### 6.2 Validação a Posteriori: 92% de Pureza
 
@@ -336,6 +372,10 @@ score_com  = silhouette_score(X_prop_geo[mask_com], labels_geo[mask_com])
 
 Usar `scaler.transform()` em vez de `fit_transform()` é essencial: recalibrar o scaler no subconjunto COM geo produziria z-scores em escala diferente, tornando a comparação inválida.
 
+![Comparativo SEM vs COM coordenadas geográficas: CNEFE 2010 BA](outputs/figures/comparativo_sem_com_geo_2010_ba.png)
+
+*Comparação lado a lado dos clusters obtidos com e sem coordenadas geográficas como features adicionais. A adição de latitude/longitude como features tende a fragmentar clusters funcionalmente homogêneos em subgrupos por localização geográfica, aumentando o número de clusters mas reduzindo a pureza semântica. O gráfico mostra os Silhouette Scores avaliados no mesmo espaço de proporções (14 features), garantindo comparação justa entre as duas configurações.*
+
 ---
 
 ## 7. Análise Temporal 2010 → 2022
@@ -366,7 +406,7 @@ Após a correção: **19.371 setores presentes nos dois anos**, base da análise
 
 ### 7.2 Métricas de Mudança
 
-Para cada setor presente nos dois anos calculamos dois indicadores. `delta_abs` é a variação bruta de endereços (positivo = cresceu, negativo = encolheu). `taxa_cresc` normaliza pelo tamanho original do setor em 2010 — sem isso, um setor pequeno que dobrou de tamanho e um grande que cresceu pouco teriam pesos equivalentes no `delta_abs`, o que distorceria a análise:
+Para cada setor presente nos dois anos calculamos dois indicadores. `delta_abs` é a variação bruta de endereços (positivo = cresceu, negativo = encolheu). `taxa_cresc` normaliza pelo tamanho original do setor em 2010  sem isso, um setor pequeno que dobrou de tamanho e um grande que cresceu pouco teriam pesos equivalentes no `delta_abs`, o que distorceria a análise:
 
 ```python
 df_match['delta_abs']  = df_match['total_2022'] - df_match['total_2010']
@@ -377,7 +417,7 @@ Crescimento médio entre 2010 e 2022: **+24,8% de endereços por setor** (median
 
 ### 7.3 Classificação de Trajetórias
 
-A função usa dois eixos de informação para cada setor: a composição em 2010 (o que ele era) e a taxa de crescimento até 2022 (o que aconteceu com ele). As regras são avaliadas em ordem — a primeira que for verdadeira determina o rótulo. Os limiares foram calibrados para capturar mudanças estruturais: 0.3 (30%) de crescimento separa expansão real de variação normal de recenseamento, e 0.5 de `prop_rural` identifica setores predominantemente rurais, não apenas com alguma presença rural:
+A função usa dois eixos de informação para cada setor: a composição em 2010 (o que ele era) e a taxa de crescimento até 2022 (o que aconteceu com ele). As regras são avaliadas em ordem  a primeira que for verdadeira determina o rótulo. Os limiares foram calibrados para capturar mudanças estruturais: 0.3 (30%) de crescimento separa expansão real de variação normal de recenseamento, e 0.5 de `prop_rural` identifica setores predominantemente rurais, não apenas com alguma presença rural:
 
 ```python
 def classificar_trajetoria(row):
@@ -405,6 +445,34 @@ def classificar_trajetoria(row):
 
 O cruzamento **trajetória × cluster 2022** revela que o tipo de setor prediz a trajetória: setores classificados como "Residencial Denso" em 2022 concentram os casos de adensamento urbano; setores "Rural Agrícola" tendem a permanecer estáveis ou declinar.
 
+![Perfil de clustering 2010 na Bahia](outputs/figures/mapa_perfil_2010_ba.png)
+
+*Distribuição geográfica dos clusters do CNEFE 2010 na Bahia. Como o CNEFE 2010 não tem coordenadas por endereço, os setores são plotados pelo centroide aproximado. A separação litoral/sertão é visível mesmo com features apenas de tipo de logradouro.*
+
+![Perfil de clustering 2022 na Bahia](outputs/figures/mapa_perfil_2022_ba.png)
+
+*Mesma visualização para 2022, agora com coordenadas precisas por endereço. Permite comparar visualmente a evolução da estrutura de uso do solo entre os dois censos: Salvador e Feira de Santana ganham setores Residenciais Densos; o interior mantém o perfil Rural.*
+
+![Transições de perfil entre 2010 e 2022](outputs/figures/mapa_transicoes_2010_2022_ba.png)
+
+*Mapa colorido pela mudança de perfil de cada setor entre 2010 e 2022. Setores que transitaram de Rural para Residencial aparecem em uma cor de transição; setores estáveis mantêm sua cor original. As franjas de expansão urbana ao redor das principais cidades são visualmente identificáveis.*
+
+![Matriz de transição de clusters 2010 para 2022](outputs/figures/matriz_transicao_2010_2022_ba.png)
+
+*Matriz de contingência mostrando quantos setores de cada cluster de 2010 migraram para cada cluster de 2022. A diagonal principal representa setores que mantiveram o mesmo perfil; fora da diagonal, mudanças de tipo. Clusters rurais de 2010 com fluxo significativo para clusters Residenciais em 2022 indicam as áreas de urbanização mais intensa.*
+
+![Taxa de crescimento de endereços por cluster (2010 a 2022)](outputs/figures/crescimento_por_cluster_ba.png)
+
+*Crescimento percentual médio de endereços por cluster entre 2010 e 2022. Clusters Residenciais Densos e Em Construção tendem a mostrar as maiores taxas, confirmando que o tipo de setor em 2022 é preditor da dinâmica de crescimento. Clusters Rurais Agrícolas apresentam crescimento próximo de zero ou negativo.*
+
+![Trajetória dos setores 2010 a 2022 no mapa da Bahia](outputs/figures/mapa_trajetoria_temporal_ba.png)
+
+*Cada setor colorido pela trajetória classificada pela função `classificar_trajetoria`. Setores "Rural → Urbano" (em laranja ou vermelho) concentram-se na periferia das cidades médias. "Adensamento Urbano" aparece nos anéis intermediários das capitais regionais. "Declínio" é visível em municípios do sertão com êxodo rural.*
+
+![Cruzamento trajetória temporal por cluster 2022](outputs/figures/trajetoria_vs_cluster_ba.png)
+
+*Matriz de frequência cruzando trajetória (2010→2022) com o cluster atribuído em 2022. Confirma que o tipo de setor em 2022 tem poder preditivo sobre a trajetória: "Residencial Denso" concentra "Adensamento Urbano"; "Rural Agrícola" concentra "Estável" e "Declínio"; clusters Em Construção têm alta proporção de setores "Novos".*
+
 ---
 
 ## 8. Comparação de Algoritmos: DBSCAN vs HDBSCAN
@@ -424,6 +492,10 @@ kdist = np.sort(dists[:, k-1])[::-1]   # distância ao 3º vizinho, ordem decres
 
 No caso dos setores censitários da Bahia, o k-distance plot **não mostra cotovelo claro**. A curva declina de forma suave e contínua  os dados têm densidades muito diferentes entre os grupos (setores urbanos de Salvador são muito mais densos que setores rurais do sertão). Qualquer ε escolhido será arbitrário.
 
+![K-distance plot para os setores censitários da BA](outputs/figures/kdistance_plot.png)
+
+*O k-distance plot ordena todos os setores pela distância ao 3º vizinho mais próximo no espaço UMAP (eixo y), do maior para o menor (eixo x). Um "cotovelo" claro indicaria o ε ideal. A ausência de cotovelo aqui, com a curva declinando suavemente, é o diagnóstico visual de que os dados têm múltiplas densidades sobrepostas: não existe um único valor de ε que funcione bem para todos os grupos simultaneamente.*
+
 ### 8.2 Varredura de ε: O Dilema do Dom. Coletivo
 
 | ε                | Clusters     | Ruído %       | Dom. Coletivo?           |
@@ -437,9 +509,21 @@ No caso dos setores censitários da Bahia, o k-distance plot **não mostra cotov
 
 Com ε=1.50, o DBSCAN chega ao mesmo número de clusters que o HDBSCAN e ao mesmo nível de ruído, mas **perde os 175 setores de Domicílio Coletivo** (hospitais, presídios, asilos), que são absorvidos pelo cluster Residencial. Não é um detalhe estatístico: o algoritmo passa a classificar um hospital da mesma forma que uma rua residencial.
 
+![Comparação DBSCAN ε=0.30 no espaço UMAP](outputs/figures/comp_dbscan_030.png)
+
+*DBSCAN com ε=0.30 no espaço UMAP. Com raio pequeno, o algoritmo é sensível à estrutura local e detecta 19 clusters, incluindo Dom. Coletivo. O lado negativo é 1.1% de ruído e fragmentação excessiva: tipos funcionalmente idênticos ficam em clusters separados apenas por pequenas diferenças de densidade local.*
+
+![Comparação DBSCAN ε=1.50 no espaço UMAP](outputs/figures/comp_dbscan_150.png)
+
+*DBSCAN com ε=1.50 no espaço UMAP. Com raio maior, o algoritmo "cola" regiões de densidade variável e reduz para 13 clusters com apenas 0.3% de ruído, mesmos números do HDBSCAN. O problema: o raio agora é grande o suficiente para absorver os 175 setores Dom. Coletivo (cluster compacto mas pequeno) dentro do cluster Residencial adjacente. O cluster Dom. Coletivo desaparece do resultado.*
+
+![Comparação HDBSCAN no espaço UMAP](outputs/figures/comp_hdbscan.png)
+
+*HDBSCAN com min_cluster_size=50 no mesmo espaço UMAP. Obtém 13 clusters e 0.3% de ruído como o DBSCAN ε=1.50, mas mantém o cluster Dom. Coletivo intacto. A diferença é estrutural: o HDBSCAN avalia densidade localmente em múltiplas escalas simultaneamente, permitindo que regiões esparsas (Rural) e regiões compactas (Dom. Coletivo) coexistam como clusters válidos.*
+
 ### 8.3 Por que a Densidade Variável é o Problema Fundamental
 
-O DBSCAN trata densidade como uniforme: define um único ε para todo o espaço. O HDBSCAN é **hierárquico**: constrói uma árvore de dendrograma e seleciona clusters em diferentes níveis de densidade, preservando tanto os grupos compactos (Dom. Coletivo — 175 setores muito específicos) quanto os grupos difusos (Rural — muitos setores com composição variada). Ao contrário do ε do DBSCAN — que não tem unidade intuitiva no espaço UMAP —, `min_cluster_size` tem interpretação direta: "só considere um grupo como cluster se ele contiver ao menos 50 setores":
+O DBSCAN trata densidade como uniforme: define um único ε para todo o espaço. O HDBSCAN é **hierárquico**: constrói uma árvore de dendrograma e seleciona clusters em diferentes níveis de densidade, preservando tanto os grupos compactos (Dom. Coletivo 175 setores muito específicos) quanto os grupos difusos (Rural muitos setores com composição variada). Ao contrário do ε do DBSCAN que não tem unidade intuitiva no espaço UMAP , `min_cluster_size` tem interpretação direta: "só considere um grupo como cluster se ele contiver ao menos 50 setores":
 
 ```python
 # HDBSCAN — sem ε, parâmetro com interpretação direta
@@ -459,6 +543,20 @@ clusterer = hdbscan.HDBSCAN(
 | Dom. Coletivo preservado?        | ✓             | **✗**   | ✓                              |
 | Parâmetro principal             | ε arbitrário | ε arbitrário | min_cluster_size interpretável |
 | Robustez a densidades variáveis | Baixa          | Baixa          | Alta                            |
+
+Os mapas semânticos abaixo mostram a distribuição geográfica dos tipos de setor para cada configuração, evidenciando como o HDBSCAN mantém o cluster Dom. Coletivo (vermelho) enquanto o DBSCAN com ε=1.50 o dissolve no cluster Residencial:
+
+![Mapa semantico DBSCAN ε=0.30](outputs/figures/mapa_semantico_dbscan_030.png)
+
+*Mapa geográfico com os setores coloridos pelo tipo semântico atribuído pelo DBSCAN ε=0.30. Com 19 clusters, há mais tipos distintos no mapa, mas a legenda fica mais fragmentada. O Dom. Coletivo (vermelho) é visível nas cidades polo. A fragmentação excessiva dificulta a leitura regional.*
+
+![Mapa semantico DBSCAN ε=1.50](outputs/figures/mapa_semantico_dbscan_150.png)
+
+*Mesmo mapa para DBSCAN ε=1.50. O Dom. Coletivo (vermelho) desaparece: os hospitais, presídios e asilos da Bahia agora são classificados como Residencial (azul), tornando impossível qualquer análise que dependa da identificação dessas instalações. O mapa parece mais "limpo", mas esconde informação crítica.*
+
+![Mapa semantico HDBSCAN](outputs/figures/mapa_semantico_hdbscan.png)
+
+*Mapa para o HDBSCAN. 13 clusters, 0.3% de ruído e Dom. Coletivo preservado (pontos vermelhos visíveis em Salvador e nas cidades regionais). Este é o resultado final adotado pelo trabalho: a melhor combinação de cobertura, granularidade e preservação de grupos minoritários importantes para análise de saúde pública.*
 
 ---
 
