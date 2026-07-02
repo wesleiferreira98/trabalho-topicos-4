@@ -13,11 +13,13 @@
 3. [Dados e Infraestrutura](#3-dados-e-infraestrutura)
 4. [Engenharia de Features](#4-engenharia-de-features)
 5. [Pipeline de Modelagem 2022](#5-pipeline-de-modelagem-2022)
-6. [Análise de 2010: Validação Cruzada Temporal](#6-análise-de-2010-validação-cruzada-temporal)
+6. [Análise de 2010: Validação a Posteriori e Consistência Temporal](#6-análise-de-2010-validação-a-posteriori-e-consistência-temporal)
 7. [Análise Temporal 2010 → 2022](#7-análise-temporal-2010--2022)
 8. [Comparação de Algoritmos: DBSCAN vs HDBSCAN](#8-comparação-de-algoritmos-dbscan-vs-hdbscan)
 9. [Resultados e Interpretação](#9-resultados-e-interpretação)
 10. [Estrutura do Repositório](#10-estrutura-do-repositório)
+11. [Perguntas Frequentes sobre a Metodologia](#11-perguntas-frequentes-sobre-a-metodologia)
+12. [Referências Bibliográficas](#12-referências-bibliográficas)
 
 ---
 
@@ -312,7 +314,9 @@ Os clusters 0–3 merecem atenção: seus z-scores são praticamente idênticos 
 
 ---
 
-## 6. Análise de 2010: Validação Cruzada Temporal
+## 6. Análise de 2010: Validação a Posteriori e Consistência Temporal
+
+O termo *validação cruzada* aqui não se refere ao k-fold cross-validation de aprendizado supervisionado. Não há divisão treino/teste, não há modelo sendo avaliado por generalização e não há rótulo sendo predito. O que se faz nesta seção é aplicar o mesmo pipeline não supervisionado ao CNEFE 2010 de forma independente e, somente após o clustering, cruzar o resultado com o campo `situacao` (urbano/rural) que não foi usado em nenhum momento como feature. Esse cruzamento é chamado de *validação externa* ou *validação a posteriori*: verificamos se a estrutura descoberta pelo algoritmo corresponde a uma classificação oficial que ele nunca viu. A palavra "temporal" indica que o objetivo final é comparar os clusters de 2010 com os de 2022 para identificar trajetórias de mudança, não avaliar desempenho de um modelo preditivo.
 
 ### 6.1 Clustering do CNEFE 2010
 
@@ -364,7 +368,7 @@ Para verificar se adicionar coordenadas melhora o clustering, realizamos um expe
 # SEM geo: avaliado em 14D
 score_sem = silhouette_score(X[mask_sem], df_2010['cluster'].values[mask_sem])
 
-# COM geo: também avaliado em 14D — usa scaler.transform (não fit_transform)
+# COM geo: também avaliado em 14D, usa scaler.transform (não fit_transform)
 # para manter a mesma escala e tornar os scores comparáveis
 X_prop_geo = scaler.transform(df_geo[FEATURES])
 score_com  = silhouette_score(X_prop_geo[mask_com], labels_geo[mask_com])
@@ -526,7 +530,7 @@ Com ε=1.50, o DBSCAN chega ao mesmo número de clusters que o HDBSCAN e ao mesm
 O DBSCAN trata densidade como uniforme: define um único ε para todo o espaço. O HDBSCAN é **hierárquico**: constrói uma árvore de dendrograma e seleciona clusters em diferentes níveis de densidade, preservando tanto os grupos compactos (Dom. Coletivo 175 setores muito específicos) quanto os grupos difusos (Rural muitos setores com composição variada). Ao contrário do ε do DBSCAN que não tem unidade intuitiva no espaço UMAP , `min_cluster_size` tem interpretação direta: "só considere um grupo como cluster se ele contiver ao menos 50 setores":
 
 ```python
-# HDBSCAN — sem ε, parâmetro com interpretação direta
+# HDBSCAN: sem ε, parâmetro com interpretação direta
 clusterer = hdbscan.HDBSCAN(
     min_cluster_size=50,   # threshold mínimo de tamanho para existir como cluster
     min_samples=3,
@@ -640,13 +644,63 @@ jupyter nbconvert --to notebook --execute notebooks/09_comparacao_algoritmos.ipy
 
 ---
 
-## 11. Referências Bibliográficas
+## 11. Perguntas Frequentes sobre a Metodologia
+
+**O IBGE já classifica cada endereço por `COD_ESPECIE`. O que este trabalho acrescenta que o IBGE não entrega?**
+
+O IBGE classifica cada *endereço* individualmente: "este endereço é um domicílio particular", "este é um estabelecimento de saúde". O que o IBGE não entrega é uma *tipologia de setor censitário* baseada na composição funcional agregada. O produto oficial é binário: urbano ou rural. As tipologias descobertas aqui (Residencial Denso, Rural Agrícola, Domicílio Coletivo (Institucional), Uso Misto Comercial) não existem em nenhuma publicação do IBGE. Usamos a classificação por endereço como matéria-prima; o que geramos como saída é distinto e mais granular do que qualquer produto oficial disponível.
+
+---
+
+**Por que proporções em vez de contagens absolutas de endereços?**
+
+Contagens absolutas acoplam a composição funcional ao tamanho do setor. Um setor residencial com 800 domicílios e um setor residencial com 80 ficam numericamente distantes mesmo tendo o mesmo perfil de uso do solo. Com proporções, dois setores com composição 90% residencial ficam próximos no espaço de features independentemente do tamanho, que é o objetivo: comparar *perfil*, não *volume*. O volume (`total_enderecos`) é mantido como atributo descritivo separado e usado nas análises temporais de crescimento, mas nunca como feature de clustering.
+
+---
+
+**Por que aprendizado não supervisionado se existe o campo `situacao` (urbano/rural) no CNEFE 2010?**
+
+Duas razões independentes, cada uma suficiente por si só.
+
+Primeira: o campo `situacao` existe apenas no CNEFE 2010; o Censo 2022 não tem campo equivalente. Uma abordagem supervisionada treinada em 2010 não pode ser aplicada em 2022 sem uma cadeia de mapeamentos arbitrários entre os dois schemas.
+
+Segunda: o objetivo não é replicar a classificação urbano/rural, mas descobrir subtipos dentro de cada classe. Um modelo supervisionado com `situacao` como alvo aprenderia a separar urbano de rural e nada mais. As tipologias que buscamos (hospitais vs. residências vs. fazendas) existem dentro do grupo "urbano" e dentro do grupo "rural" simultaneamente. Usar `situacao` como feature tornaria a análise circular: encontraríamos clusters de "urbano" e "rural" porque incluímos exatamente esses rótulos na entrada.
+
+O cruzamento com `situacao` acontece apenas *depois* do clustering, como validação: o fato de 92% de pureza ser atingida sem nunca ter visto o campo confirma que a abordagem captura estrutura real.
+
+---
+
+**Por que HDBSCAN e não DBSCAN?**
+
+O DBSCAN exige um único parâmetro ε (raio de vizinhança) aplicado uniformemente a todos os pontos. Nos setores censitários da Bahia, as densidades são muito heterogêneas: Salvador tem setores urbanos extremamente compactos; o sertão tem setores rurais espalhados. O k-distance plot sem cotovelo (seção 8.1) é o diagnóstico quantitativo desse problema.
+
+A consequência prática está na varredura de ε (seção 8.2): qualquer valor que controle bem o ruído nos setores urbanos é grande demais para os rurais, e o único ponto em que o DBSCAN atinge 0.3% de ruído (ε=1.50) é justamente onde perde os 175 setores de Domicílio Coletivo (hospitais, presídios e asilos) que constituem um grupo funcionalmente distinto e relevante para análise de saúde pública.
+
+O HDBSCAN resolve isso avaliando densidade localmente em múltiplas escalas via árvore hierárquica, sem exigir que todas as regiões do espaço tenham a mesma densidade. O resultado com `min_cluster_size=50` atinge os mesmos 13 clusters e 0.3% de ruído que o DBSCAN ε=1.50, mantendo o cluster Dom. Coletivo intacto.
+
+---
+
+**Por que Parquet e DuckDB em vez de CSV e Pandas?**
+
+Com ~9 milhões de linhas apenas para a Bahia, o CSV do CNEFE 2022 ocupa mais de 2 GB em disco e esgotaria a RAM de uma máquina de desenvolvimento comum ao ser carregado via `pd.read_csv()`. Parquet resolve o armazenamento (colunar + compressão Snappy, ~8x menor que CSV) e DuckDB resolve a agregação: executa a query SQL diretamente sobre o arquivo Parquet sem carregar o conjunto completo em memória, reduzindo 9 milhões de linhas para ~30 mil setores em segundos. A escolha não é preferência técnica, mas necessidade prática para o volume dos dados.
+
+---
+
+**O Silhouette Score negativo em 11D não indica que os clusters são ruins?**
+
+O Silhouette Score mede separação euclidiana entre clusters. O UMAP com `min_dist=0.0` forma clusters baseados em *vizinhança topológica*: dois setores pertencem ao mesmo cluster se estão conectados por uma cadeia de vizinhos próximos, mesmo que a distância euclidiana direta em 11D entre eles seja grande. Isso é esperado e deliberado: setores em cidades diferentes da Bahia têm o mesmo perfil funcional (mesmas proporções de COD_ESPECIE) mas foram separados geograficamente pelo UMAP, criando clusters topologicamente coesos que parecem sobrepostos quando medidos por distância euclidiana em 11D.
+
+O Silhouette positivo no espaço UMAP (0.31) confirma que os clusters fazem sentido no espaço onde foram criados. O negativo em 11D não invalida o resultado: é uma consequência previsível e documentada de usar uma métrica euclidiana para avaliar clusters topológicos.
+
+---
+
+## 12. Referências Bibliográficas
 
 ### Algoritmos e Métodos
 
 **[1]** Campello, R. J. G. B., Moulavi, D., & Sander, J. (2013). Density-based clustering based on hierarchical density estimates. In *Advances in Knowledge Discovery and Data Mining PAKDD 2013*, Lecture Notes in Computer Science, vol. 7819, pp. 160–172. Springer, Berlin, Heidelberg.
 
-> Artigo original do HDBSCAN. Define o conceito de *mutual reachability distance* e *condensed cluster tree*, que permitem identificar clusters de densidades variáveis sem a necessidade de um parâmetro ε fixo — motivação central para a escolha do algoritmo neste trabalho.
+> Artigo original do HDBSCAN. Define o conceito de *mutual reachability distance* e *condensed cluster tree*, que permitem identificar clusters de densidades variáveis sem a necessidade de um parâmetro ε fixo, motivação central para a escolha do algoritmo neste trabalho.
 
 **[2]** McInnes, L., Healy, J., & Melville, J. (2018). UMAP: Uniform Manifold Approximation and Projection for Dimension Reduction. *arXiv preprint arXiv:1802.03426*.
 
@@ -672,7 +726,7 @@ jupyter nbconvert --to notebook --execute notebooks/09_comparacao_algoritmos.ipy
 
 **[7]** Venerandi, A., Quattrone, G., & Capra, L. (2018). A scalable method to quantify the relationship between urban form and socioeconomic indexes. In *Proceedings of the 26th ACM SIGSPATIAL International Conference on Advances in Geographic Information Systems*, pp. 408–411.
 
-> Aplica representação vetorial de composição de uso do solo para caracterizar setores urbanos — similar ao vetor de proporções deste trabalho. Suporte direto para a escolha de features baseadas em proporções de tipo de estabelecimento em vez de contagens absolutas.
+> Aplica representação vetorial de composição de uso do solo para caracterizar setores urbanos, similar ao vetor de proporções deste trabalho. Suporte direto para a escolha de features baseadas em proporções de tipo de estabelecimento em vez de contagens absolutas.
 
 **[8]** Fonseca, F., & Bação, F. (2005). Classificação de áreas urbanas: uma abordagem baseada em sistemas de auto-organização. *Finisterra Revista Portuguesa de Geografia*, 40(79), 61–78.
 
