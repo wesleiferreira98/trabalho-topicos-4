@@ -289,6 +289,16 @@ Com HDBSCAN direto em 11D, **89% dos setores são descartados como ruído**  o a
 
 **UMAP** (Uniform Manifold Approximation and Projection) reduz as 11 dimensões para 2, preservando a estrutura de vizinhança local. Se dois setores são similares em composição funcional, eles ficam próximos no espaço 2D do UMAP.
 
+#### A redução: de 11D para 2D
+
+O dado bruto de entrada tem 11 features (as proporções por setor), logo cada setor é um ponto em um espaço de 11 dimensões. O UMAP projeta esses 30.355 pontos em apenas 2 coordenadas (`umap_x`, `umap_y`), com o objetivo de manter a vizinhança: se dois setores eram vizinhos próximos em 11D, devem continuar próximos em 2D.
+
+**Por que 2D e não 3D?** A escolha de `n_components=2` tem duas vantagens práticas. Primeira: 2D é diretamente visualizável em um gráfico de dispersão, o que permite inspeção humana da estrutura antes e depois do clustering, e facilita a comunicação dos resultados. Segunda: para este conjunto de dados, a separação entre os grupos já é suficientemente clara em 2D — grupos como Dom. Coletivo e Rural Agrícola aparecem como ilhas bem separadas na projeção, sem necessidade de uma terceira dimensão para distingui-los. O uso de 3D aumentaria levemente a informação preservada, mas tornaria o clustering e a validação visual mais custosos sem ganho substancial.
+
+**O que é preservado e o que é perdido:** o UMAP preserva a *estrutura topológica local* — quem é vizinho de quem — mas não preserva distâncias absolutas nem geometria global. As coordenadas `umap_x` e `umap_y` não têm interpretação direta (não são componentes principais, não representam nenhuma feature original). O que importa é a posição relativa: dois setores próximos no espaço UMAP têm composição funcional similar; dois setores distantes têm composição diferente.
+
+**Importante:** a projeção UMAP não é exclusiva do HDBSCAN. Na seção 8, o DBSCAN também é aplicado sobre as mesmas coordenadas `umap_x` e `umap_y`. Ambos os algoritmos recebem exatamente a mesma entrada 2D, tornando a comparação de resultados diretamente válida.
+
 ```python
 import umap
 
@@ -304,7 +314,7 @@ X_umap = reducer.fit_transform(X)
 Os parâmetros têm justificativa direta:
 
 - `n_neighbors=30`: com 30.000 pontos, valor alto de vizinhança garante que a estrutura global (relação entre todos os tipos de setor) seja preservada, não apenas micro-estruturas locais
-- `min_dist=0.0`: força pontos similares a se agruparem o máximo possível no espaço 2D, criando separação visual clara entre grupos essencial para que o HDBSCAN encontre fronteiras nítidas
+- `min_dist=0.0`: força pontos similares a se agruparem o máximo possível no espaço 2D, criando separação visual clara entre grupos, essencial para que o HDBSCAN encontre fronteiras nítidas
 
 ![Projeção UMAP dos 30.355 setores censitários da Bahia em 2D](outputs/figures/umap_setores.png)
 
@@ -553,6 +563,14 @@ O cruzamento **trajetória × cluster 2022** revela que o tipo de setor prediz a
 ---
 
 ## 8. Comparação de Algoritmos: DBSCAN vs HDBSCAN
+
+Um ponto metodológico essencial antes de qualquer comparação: **tanto o DBSCAN quanto o HDBSCAN recebem como entrada as mesmas coordenadas 2D geradas pelo UMAP** (`umap_x`, `umap_y`). O UMAP não é uma vantagem exclusiva do HDBSCAN — é uma etapa de pré-processamento compartilhada. O que varia entre os algoritmos é apenas como cada um particiona esse mesmo espaço 2D. Isso torna a comparação direta e justa: qualquer diferença nos resultados vem do comportamento do algoritmo, não da entrada.
+
+```
+11 features (z-score) → UMAP (11D → 2D) → { DBSCAN ε=0.30  → 19 clusters, 1.1% ruído }
+                                            { DBSCAN ε=1.50  → 13 clusters, 0.3% ruído }
+                                            { HDBSCAN        → 13 clusters, 0.3% ruído }
+```
 
 ### 8.1 O Problema do Parâmetro ε no DBSCAN
 
