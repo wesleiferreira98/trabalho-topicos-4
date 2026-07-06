@@ -564,7 +564,7 @@ O cruzamento **trajetória × cluster 2022** revela que o tipo de setor prediz a
 
 ## 8. Comparação de Algoritmos: DBSCAN vs HDBSCAN
 
-Um ponto metodológico essencial antes de qualquer comparação: **tanto o DBSCAN quanto o HDBSCAN recebem como entrada as mesmas coordenadas 2D geradas pelo UMAP** (`umap_x`, `umap_y`). O UMAP não é uma vantagem exclusiva do HDBSCAN — é uma etapa de pré-processamento compartilhada. O que varia entre os algoritmos é apenas como cada um particiona esse mesmo espaço 2D. Isso torna a comparação direta e justa: qualquer diferença nos resultados vem do comportamento do algoritmo, não da entrada.
+Um ponto metodológico essencial antes de qualquer comparação: **tanto o DBSCAN quanto o HDBSCAN recebem como entrada as mesmas coordenadas 2D geradas pelo UMAP** (`umap_x`, `umap_y`). O UMAP não é uma vantagem exclusiva do HDBSCAN é uma etapa de pré-processamento compartilhada. O que varia entre os algoritmos é apenas como cada um particiona esse mesmo espaço 2D. Isso torna a comparação direta e justa: qualquer diferença nos resultados vem do comportamento do algoritmo, não da entrada.
 
 ```
 11 features (z-score) → UMAP (11D → 2D) → { DBSCAN ε=0.30  → 19 clusters, 1.1% ruído }
