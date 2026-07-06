@@ -1,4 +1,4 @@
-# Descoberta de Tipologias de Uso do Solo em Setores Censitários da Bahia via Aprendizado Não Supervisionado
+# Agrupamentos de Tipos de Setores Censitários da Bahia via Aprendizado Não Supervisionado
 
 **Disciplina:** Tópicos em Inteligência Artificial Aprendizado Não Supervisionado
 **Dataset:** CNEFE 2010 e Censo 2022 (IBGE) Estado da Bahia
@@ -81,7 +81,7 @@ CNEFE do Censo Demográfico 2022  Bahia. ~9 milhões de registros. Campos princi
 
 ![Dispersão geográfica dos endereços do Censo 2022 na Bahia (amostra 50k)](outputs/figures/censo_dispersao_geo.png)
 
-*Amostra de 50 mil endereços plotados pelas coordenadas LATITUDE/LONGITUDE do CNEFE 2022. O padrão revela a concentração de endereços na faixa litorânea e nas principais cidades polo (Salvador, Feira de Santana, Vitória da Conquista), com baixa densidade no sertão semi-árido. Essa assimetria geográfica é um dos motivos pelos quais algoritmos de clustering baseados em densidade precisam ser robustos a densidades variáveis.*
+*Esta figura usa uma amostra de 50 mil endereços exclusivamente para fins de visualização, via `USING SAMPLE 50000` no DuckDB. Todo o restante do pipeline, incluindo o cálculo de proporções, a normalização, o UMAP e o HDBSCAN, opera sobre os 9 milhões de registros completos do Censo 2022. A amostragem aqui serve apenas para tornar o scatter plot renderizável: plotar 9 milhões de pontos sobrecarregaria qualquer ambiente gráfico sem acrescentar informação visual relevante.*
 
 ### 3.2 Por que Parquet
 
@@ -121,6 +121,15 @@ df_setores = con.execute(f"""
 ```
 
 Essa query reduz 9 milhões de linhas para ~30.000 setores em segundos, sem ocupar memória com os dados brutos. O resultado já chega como `DataFrame` Pandas, pronto para o pipeline de ML.
+
+**Por que 9 milhões de registros foram processados em tempo hábil?**
+
+Quatro fatores combinados explicam o desempenho:
+
+1. **Leitura seletiva de colunas (Parquet):** o arquivo tem 34 colunas, mas a query lê apenas 4 (`COD_SETOR`, `COD_ESPECIE`, `LATITUDE`, `LONGITUDE`). O formato colunar do Parquet permite isso nativamente: os dados das colunas não selecionadas nunca saem do disco, reduzindo o volume de I/O em cerca de 90%.
+2. **Execução SQL embutida (DuckDB):** a agregação `GROUP BY COD_SETOR` é executada dentro do próprio DuckDB, diretamente sobre o arquivo Parquet. Os 9 milhões de linhas nunca são carregados no Python: o que entra na memória é apenas o resultado agregado, com ~30.000 linhas.
+3. **Redução de escala antecipada:** a query transforma o problema de ML antes mesmo de qualquer algoritmo ser chamado. Os modelos (UMAP, HDBSCAN, DBSCAN) nunca veem os 9 milhões de endereços, apenas os 30.355 vetores de proporção resultantes.
+4. **UMAP e HDBSCAN em escala reduzida:** com 30.355 pontos em 11 dimensões, o UMAP leva poucos minutos em CPU. O HDBSCAN aplicado no espaço 2D resultante é quase instantâneo. A arquitetura do pipeline garante que a complexidade computacional dos algoritmos mais custosos recaia sobre um dataset já compacto, não sobre os dados brutos.
 
 ### 3.4 Coleta e Pré-processamento
 
@@ -273,9 +282,11 @@ O resultado final é salvo em `outputs/setores_features.parquet`: **30.355 setor
 
 ### 5.1 O Problema de Clustering em Alta Dimensão
 
-Algoritmos baseados em densidade sofrem com a **maldição da dimensionalidade** em espaços de alta dimensão. Em 11 dimensões, a distância entre pontos tende a se homogeneizar pontos próximos e distantes ficam numericamente semelhantes, e a noção de "vizinhança densa" colapsa.
+> **Nota sobre dimensionalidade:** os valores "11D" nesta seção referem-se exclusivamente ao **Censo 2022**, que possui 11 features de proporção (8 categorias de `COD_ESPECIE` + 3 indicadores de finalidade). O CNEFE 2010, tratado na seção 6, tem 12 features de tipo de logradouro e portanto opera em 12D. Os dois datasets têm dimensionalidades distintas porque seus campos originais são diferentes.
 
-A tentativa direta de HDBSCAN nos 11 features confirma isso:
+Algoritmos baseados em densidade sofrem com a **maldição da dimensionalidade** em espaços de alta dimensão. Em 11 dimensões, a distância entre pontos tende a se homogeneizar: pontos próximos e distantes ficam numericamente semelhantes, e a noção de "vizinhança densa" colapsa.
+
+A tentativa direta de HDBSCAN nos 11 features do Censo 2022 confirma isso:
 
 ```
                            11D direto    UMAP→HDBSCAN
@@ -283,7 +294,7 @@ Clusters encontrados              7              13
 Ruído (%)                      89.3%           0.3%
 ```
 
-Com HDBSCAN direto em 11D, **89% dos setores são descartados como ruído**  o algoritmo não encontra estrutura densa no espaço original.
+Com HDBSCAN direto em 11D, **89% dos setores são descartados como ruído**. O algoritmo não encontra estrutura densa suficiente no espaço original.
 
 ### 5.2 UMAP como Pré-processamento
 
@@ -293,9 +304,9 @@ Com HDBSCAN direto em 11D, **89% dos setores são descartados como ruído**  o a
 
 O dado bruto de entrada tem 11 features (as proporções por setor), logo cada setor é um ponto em um espaço de 11 dimensões. O UMAP projeta esses 30.355 pontos em apenas 2 coordenadas (`umap_x`, `umap_y`), com o objetivo de manter a vizinhança: se dois setores eram vizinhos próximos em 11D, devem continuar próximos em 2D.
 
-**Por que 2D e não 3D?** A escolha de `n_components=2` tem duas vantagens práticas. Primeira: 2D é diretamente visualizável em um gráfico de dispersão, o que permite inspeção humana da estrutura antes e depois do clustering, e facilita a comunicação dos resultados. Segunda: para este conjunto de dados, a separação entre os grupos já é suficientemente clara em 2D — grupos como Dom. Coletivo e Rural Agrícola aparecem como ilhas bem separadas na projeção, sem necessidade de uma terceira dimensão para distingui-los. O uso de 3D aumentaria levemente a informação preservada, mas tornaria o clustering e a validação visual mais custosos sem ganho substancial.
+**Por que 2D e não 3D?** A escolha de `n_components=2` tem duas vantagens práticas. Primeira: 2D é diretamente visualizável em um gráfico de dispersão, o que permite inspeção humana da estrutura antes e depois do clustering, e facilita a comunicação dos resultados. Segunda: para este conjunto de dados, a separação entre os grupos já é suficientemente clara em 2D grupos como Dom. Coletivo e Rural Agrícola aparecem como ilhas bem separadas na projeção, sem necessidade de uma terceira dimensão para distingui-los. O uso de 3D aumentaria levemente a informação preservada, mas tornaria o clustering e a validação visual mais custosos sem ganho substancial.
 
-**O que é preservado e o que é perdido:** o UMAP preserva a *estrutura topológica local* — quem é vizinho de quem — mas não preserva distâncias absolutas nem geometria global. As coordenadas `umap_x` e `umap_y` não têm interpretação direta (não são componentes principais, não representam nenhuma feature original). O que importa é a posição relativa: dois setores próximos no espaço UMAP têm composição funcional similar; dois setores distantes têm composição diferente.
+**O que é preservado e o que é perdido:** o UMAP preserva a *estrutura topológica local*  quem é vizinho de quem, mas não preserva distâncias absolutas nem geometria global. As coordenadas `umap_x` e `umap_y` não têm interpretação direta (não são componentes principais, não representam nenhuma feature original). O que importa é a posição relativa: dois setores próximos no espaço UMAP têm composição funcional similar; dois setores distantes têm composição diferente.
 
 **Importante:** a projeção UMAP não é exclusiva do HDBSCAN. Na seção 8, o DBSCAN também é aplicado sobre as mesmas coordenadas `umap_x` e `umap_y`. Ambos os algoritmos recebem exatamente a mesma entrada 2D, tornando a comparação de resultados diretamente válida.
 
@@ -385,7 +396,7 @@ NOMES_CLUSTER = {
 
 *Heatmap de z-scores médios: linhas são clusters, colunas são features. Cores quentes (positivo) indicam que o cluster tem proporção acima da média; cores frias (negativo), abaixo. A leitura é por linha: o cluster 11 (Dom. Coletivo) aparece como uma faixa isolada com z-score extremamente positivo em `prop_domicilio_coletivo` e negativo em todo o resto. Clusters rurais se destacam em `prop_estab_agropecuario`; clusters residenciais urbanos têm z-score alto em `prop_domicilio_particular` e `prop_finalidade_residencial`.*
 
-Os clusters 0–3 merecem atenção: seus z-scores são praticamente idênticos em todas as 11 features. O UMAP os separou porque estão geograficamente distribuídos em cidades diferentes da Bahia (Salvador, Feira de Santana, Vitória da Conquista, Ilhéus). São o mesmo tipo funcional de setor em localizações distintas o UMAP capturou tanto a similaridade de composição quanto a separação geográfica residual.
+Os clusters 0-3 merecem atenção: seus z-scores são praticamente idênticos em todas as 11 features. O UMAP os separou porque estão geograficamente distribuídos em cidades diferentes da Bahia (Salvador, Feira de Santana, Vitória da Conquista, Ilhéus). São o mesmo tipo funcional de setor em localizações distintas o UMAP capturou tanto a similaridade de composição quanto a separação geográfica residual.
 
 ![13 clusters individuais no mapa da Bahia: clusters 0-3 em cidades distintas](outputs/figures/clusters_mapa_13_individuais.png)
 
@@ -403,17 +414,27 @@ O termo *validação cruzada* aqui não se refere ao k-fold cross-validation de 
 
 ### 6.1 Clustering do CNEFE 2010
 
-Aplicamos HDBSCAN diretamente nos 12 features z-score do CNEFE 2010, sem UMAP. Como o CNEFE 2010 tem apenas ~24.000 setores (vs 30.355 em 2022) e os dados são mais esparsos  sem coordenadas geográficas e com distribuição de tipos mais binária (rua ou fazenda, sem as 8 espécies do COD_ESPECIE), usamos `min_cluster_size=200` em vez de 50, evitando fragmentação excessiva em subgrupos geograficamente locais mas semanticamente idênticos:
+Aplicamos HDBSCAN diretamente nos 12 features z-score do CNEFE 2010, **sem UMAP**. Isso é diferente do pipeline de 2022, onde o UMAP reduziu os dados para 2D antes do HDBSCAN.
 
 ```python
 clusterer = hdbscan.HDBSCAN(
-    min_cluster_size=200,   # mais conservador: 2010 tem menos setores e dados mais esparsos
+    min_cluster_size=200,   # mais conservador: ver justificativa abaixo
     min_samples=3,
     metric='euclidean',
     cluster_selection_method='eom'
 )
 df_2010['cluster'] = clusterer.fit_predict(X)
 ```
+
+**Por que `min_cluster_size=200` para 2010 e `50` para 2022?**
+
+A diferença não é arbitrária — ela decorre de uma diferença estrutural entre os dois pipelines:
+
+No pipeline de 2022, o UMAP comprime os dados de 11D para 2D antes do HDBSCAN. Nesse espaço 2D, setores similares ficam fisicamente próximos e formam ilhas compactas visíveis. Com a densidade já concentrada pela redução dimensional, 50 pontos são suficientes para o HDBSCAN identificar uma região densa como cluster.
+
+No pipeline de 2010, o HDBSCAN opera diretamente em 12D, sem UMAP. Em alta dimensão, a estimativa de densidade é menos confiável: os pontos estão mais espalhados no espaço e pequenas flutuações locais podem ser confundidas com estrutura real. Para que o HDBSCAN só reconheça como cluster algo genuinamente denso e não ruído dimensional, o limiar mínimo precisa ser maior. Com `min_cluster_size=50` em 12D, o algoritmo fragmentaria setores semanticamente idênticos em dezenas de micro-clusters por conta de variações locais nas proporções de logradouro.
+
+Um segundo fator é a natureza das features de 2010: os tipos de logradouro têm distribuição mais binária do que o COD_ESPECIE de 2022. Muitos setores têm 90-100% de uma só categoria (`prop_rua` ou `prop_fazenda`), o que cria regiões densíssimas em cantos específicos do espaço de features, separadas por vazios. Sem UMAP para redistribuir essa estrutura, o HDBSCAN com limiar pequeno superFragmentaria essas regiões densas em clusters geograficamente distintos mas funcionalmente idênticos.
 
 ![Perfil z-score dos clusters CNEFE 2010 BA](outputs/figures/perfil_clusters_2010_ba.png)
 
@@ -818,6 +839,16 @@ Com ~9 milhões de linhas apenas para a Bahia, o CSV do CNEFE 2022 ocupa mais de
 O Silhouette Score mede separação euclidiana entre clusters. O UMAP com `min_dist=0.0` forma clusters baseados em *vizinhança topológica*: dois setores pertencem ao mesmo cluster se estão conectados por uma cadeia de vizinhos próximos, mesmo que a distância euclidiana direta em 11D entre eles seja grande. Isso é esperado e deliberado: setores em cidades diferentes da Bahia têm o mesmo perfil funcional (mesmas proporções de COD_ESPECIE) mas foram separados geograficamente pelo UMAP, criando clusters topologicamente coesos que parecem sobrepostos quando medidos por distância euclidiana em 11D.
 
 O Silhouette positivo no espaço UMAP (0.31) confirma que os clusters fazem sentido no espaço onde foram criados. O negativo em 11D não invalida o resultado: é uma consequência previsível e documentada de usar uma métrica euclidiana para avaliar clusters topológicos.
+
+---
+
+**Por que `min_cluster_size=50` para 2022 e `200` para 2010?**
+
+A diferença vem de uma assimetria estrutural entre os dois pipelines. Para 2022, o HDBSCAN recebe como entrada o espaço 2D do UMAP, onde setores similares já estão fisicamente compactos. Nesse espaço comprimido, 50 pontos formam uma região densa suficientemente estável para o algoritmo reconhecer como cluster.
+
+Para 2010, o HDBSCAN opera diretamente em 12D, sem UMAP. Em alta dimensão, a estimativa de densidade é inerentemente menos confiável: pequenas variações locais nas proporções de logradouro podem gerar falsas densidades. Um `min_cluster_size=50` em 12D causaria fragmentação excessiva, separando em clusters distintos setores que são funcionalmente o mesmo tipo apenas porque estão em regiões geográficas diferentes e têm pequenas diferenças nas proporções de `prop_rua` ou `prop_fazenda`. O valor de 200 exige que o HDBSCAN só reconheça como cluster algo com densidade suficiente para sobreviver ao ruído dimensional.
+
+Em proporção do total de setores: 50/30.355 ≈ 0,16% (2022 em 2D) vs 200/23.763 ≈ 0,84% (2010 em 12D). Ambos são conservadores, mas o segundo compensa a ausência da redução dimensional.
 
 ---
 
